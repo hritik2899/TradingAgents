@@ -44,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 
 def _coerce_max_retries(value):
-    """Validate an ``llm_max_retries`` value to a non-negative int."""
     if isinstance(value, bool):
         raise ValueError(f"llm_max_retries must be an integer, not a boolean: {value!r}")
     try:
@@ -89,7 +88,6 @@ class TradingAgentsGraph:
             base_url=self.config.get("backend_url"),
             **llm_kwargs,
         )
-
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
         self.memory_log = TradingMemoryLog(self.config)
@@ -116,30 +114,20 @@ class TradingAgentsGraph:
         self._checkpointer_ctx = None
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
-        """Get provider-specific kwargs for LLM client creation."""
         kwargs: dict[str, Any] = {}
         provider = self.config.get("llm_provider", "").lower()
 
-        # "gemini" is a user-facing alias for the native Google Gemini client.
-        # Accept both names throughout the graph so workflow configuration does
-        # not have to use the implementation-specific name "google".
         if provider in {"google", "gemini"}:
             thinking_level = self.config.get("google_thinking_level")
             if thinking_level:
                 kwargs["thinking_level"] = thinking_level
-
-            # The workflow intentionally stores the credential as GEMINI_API_KEY.
-            # Passing it explicitly avoids depending on which environment variable
-            # a particular langchain-google-genai release checks internally.
             google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
             if google_api_key:
                 kwargs["api_key"] = google_api_key
-
         elif provider == "openai":
             reasoning_effort = self.config.get("openai_reasoning_effort")
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
-
         elif provider == "anthropic":
             effort = self.config.get("anthropic_effort")
             if effort:
@@ -148,35 +136,199 @@ class TradingAgentsGraph:
         temperature = self.config.get("temperature")
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
-
         max_retries = self.config.get("llm_max_retries")
         if max_retries is not None and max_retries != "":
             kwargs["max_retries"] = _coerce_max_retries(max_retries)
-
         return kwargs
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:
-        """Create tool nodes for different data sources using abstract methods."""
         return {
             "market": ToolNode([get_stock_data, get_indicators, get_verified_market_snapshot]),
             "social": ToolNode([get_news]),
             "news": ToolNode([
-                get_news,
-                get_global_news,
-                get_insider_transactions,
-                get_macro_indicators,
-                get_prediction_markets,
+                get_news, get_global_news, get_insider_transactions,
+                get_macro_indicators, get_prediction_markets,
             ]),
             "fundamentals": ToolNode([
-                get_fundamentals,
-                get_balance_sheet,
-                get_cashflow,
-                get_income_statement,
+                get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
             ]),
         }
 
     def _resolve_benchmark(self, ticker: str) -> str:
-        """Resolve the benchmark used by the graph."""
-        # Preserve the rest of the upstream implementation below this point.
-        from .trading_graph_impl import resolve_benchmark
-        return resolve_benchmark(self, ticker)
+        explicit = self.config.get("benchmark_ticker")
+        if explicit:
+            return explicit
+        benchmark_map = self.config.get("benchmark_map", {})
+        ticker_upper = ticker.upper()
+        for suffix, benchmark in benchmark_map.items():
+            if suffix and ticker_upper.endswith(suffix.upper()):
+                return benchmark
+        return benchmark_map.get("", "SPY")
+
+    def _fetch_returns(
+        self, ticker: str, trade_date: str, holding_days: int = 5,
+        benchmark: str = "SPY",
+    ) -> tuple[float | None, float | None, int | None]:
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+        try:
+            start = datetime.strptime(trade_date, "%Y-%m-%d")
+            end = start + timedelta(days=holding_days + 7)
+            end_str = end.strftime("%Y-%m-%d")
+            stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
+            bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
+            if len(stock) < 2 or len(bench) < 2:
+                return None, None, None
+            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
+            raw = float((stock["Close"].iloc[actual_days] - stock["Close"].iloc[0]) / stock["Close"].iloc[0])
+            bench_ret = float((bench["Close"].iloc[actual_days] - bench["Close"].iloc[0]) / bench["Close"].iloc[0])
+            return raw, raw - bench_ret, actual_days
+        except Exception as e:
+            logger.warning("Could not resolve outcome for %s on %s vs %s: %s", ticker, trade_date, benchmark, e)
+            return None, None, None
+
+    def _resolve_pending_entries(self, ticker: str) -> None:
+        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
+        if not pending:
+            return
+        benchmark = self._resolve_benchmark(ticker)
+        updates = []
+        for entry in pending:
+            raw, alpha, days = self._fetch_returns(ticker, entry["date"], benchmark=benchmark)
+            if raw is None:
+                continue
+            reflection = self.reflector.reflect_on_final_decision(
+                final_decision=entry.get("decision", ""),
+                raw_return=raw,
+                alpha_return=alpha,
+                benchmark_name=benchmark,
+            )
+            updates.append({
+                "ticker": ticker,
+                "trade_date": entry["date"],
+                "raw_return": raw,
+                "alpha_return": alpha,
+                "holding_days": days,
+                "reflection": reflection,
+            })
+        if updates:
+            self.memory_log.batch_update_with_outcomes(updates)
+
+    def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
+        identity = resolve_instrument_identity(ticker)
+        return build_instrument_context(ticker, asset_type, identity)
+
+    def _run_signature(self, asset_type: str) -> str:
+        return "|".join([
+            "analysts=" + ",".join(self.selected_analysts),
+            f"debate={self.config['max_debate_rounds']}",
+            f"risk={self.config['max_risk_discuss_rounds']}",
+            f"asset={asset_type}",
+        ])
+
+    def propagate(self, company_name, trade_date, asset_type: str = "stock"):
+        self.ticker = company_name
+        self._resolve_pending_entries(company_name)
+        if self.config.get("checkpoint_enabled"):
+            self._checkpointer_ctx = get_checkpointer(self.config["data_cache_dir"], company_name)
+            saver = self._checkpointer_ctx.__enter__()
+            self.graph = self.workflow.compile(checkpointer=saver)
+            step = checkpoint_step(
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_signature(asset_type),
+            )
+            if step is not None:
+                logger.info("Resuming from step %d for %s on %s", step, company_name, trade_date)
+            else:
+                logger.info("Starting fresh for %s on %s", company_name, trade_date)
+        try:
+            return self._run_graph(company_name, trade_date, asset_type=asset_type)
+        finally:
+            if self._checkpointer_ctx is not None:
+                self._checkpointer_ctx.__exit__(None, None, None)
+                self._checkpointer_ctx = None
+                self.graph = self.workflow.compile()
+
+    def save_reports(self, final_state, ticker, save_path=None) -> Path:
+        if save_path is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = Path(self.config["results_dir"]) / "reports" / f"{safe_ticker_component(ticker)}_{stamp}"
+        return write_report_tree(final_state, ticker, save_path)
+
+    def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
+        past_context = self.memory_log.get_past_context(company_name)
+        instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        init_agent_state = self.propagator.create_initial_state(
+            company_name, trade_date, asset_type=asset_type,
+            past_context=past_context, instrument_context=instrument_context,
+        )
+        args = self.propagator.get_graph_args()
+        if self.config.get("checkpoint_enabled"):
+            tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
+            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+
+        if self.debug:
+            trace = []
+            last_printed = None
+            for chunk in self.graph.stream(init_agent_state, **args):
+                if chunk["messages"]:
+                    msg = chunk["messages"][-1]
+                    signature = (type(msg).__name__, getattr(msg, "content", None))
+                    if signature != last_printed:
+                        msg.pretty_print()
+                        last_printed = signature
+                    trace.append(chunk)
+            final_state = {}
+            for chunk in trace:
+                final_state.update(chunk)
+        else:
+            final_state = self.graph.invoke(init_agent_state, **args)
+
+        self.curr_state = final_state
+        self._log_state(trade_date, final_state)
+        self.memory_log.store_decision(
+            ticker=company_name,
+            trade_date=trade_date,
+            final_trade_decision=final_state["final_trade_decision"],
+        )
+        if self.config.get("checkpoint_enabled"):
+            clear_checkpoint(
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_signature(asset_type),
+            )
+        return final_state, self.process_signal(final_state["final_trade_decision"])
+
+    def _log_state(self, trade_date, final_state):
+        self.log_states_dict[str(trade_date)] = {
+            "company_of_interest": final_state["company_of_interest"],
+            "trade_date": final_state["trade_date"],
+            "market_report": final_state["market_report"],
+            "sentiment_report": final_state["sentiment_report"],
+            "news_report": final_state["news_report"],
+            "fundamentals_report": final_state["fundamentals_report"],
+            "investment_debate_state": {
+                "bull_history": final_state["investment_debate_state"]["bull_history"],
+                "bear_history": final_state["investment_debate_state"]["bear_history"],
+                "history": final_state["investment_debate_state"]["history"],
+                "current_response": final_state["investment_debate_state"]["current_response"],
+                "judge_decision": final_state["investment_debate_state"]["judge_decision"],
+            },
+            "trader_investment_decision": final_state["trader_investment_plan"],
+            "risk_debate_state": {
+                "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
+                "conservative_history": final_state["risk_debate_state"]["conservative_history"],
+                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
+                "history": final_state["risk_debate_state"]["history"],
+                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
+            },
+            "investment_plan": final_state["investment_plan"],
+            "final_trade_decision": final_state["final_trade_decision"],
+        }
+        safe_ticker = safe_ticker_component(self.ticker)
+        directory = Path(self.config["results_dir"]) / safe_ticker / "TradingAgentsStrategy_logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log_path = directory / f"full_states_log_{trade_date}.json"
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
+
+    def process_signal(self, full_signal):
+        return self.signal_processor.process_signal(full_signal)
