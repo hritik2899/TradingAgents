@@ -1,7 +1,7 @@
 """Run TradingAgents sequentially for a fixed watchlist."""
-from datetime import date
 import json
 import os
+from datetime import date
 from pathlib import Path
 
 from tradingagents.default_config import DEFAULT_CONFIG
