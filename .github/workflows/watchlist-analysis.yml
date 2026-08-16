@@ -1,0 +1,54 @@
+name: TradingAgents Watchlist Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_date:
+        description: "Analysis date (YYYY-MM-DD); leave blank for today"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: "30 12 * * 1-5"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run seven-asset analysis
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          TRADINGAGENTS_RUN_DATE: ${{ inputs.run_date }}
+          TRADINGAGENTS_RESULTS_DIR: results/watchlist
+          TRADINGAGENTS_DEEP_THINK_LLM: z-ai/glm-5.2
+          TRADINGAGENTS_QUICK_THINK_LLM: z-ai/glm-5.2
+          TRADINGAGENTS_MAX_DEBATE_ROUNDS: "1"
+          TRADINGAGENTS_MAX_RISK_ROUNDS: "1"
+        run: python scripts/run_watchlist.py
+
+      - name: Upload analysis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradingagents-watchlist-${{ github.run_number }}
+          path: results/watchlist/
+          if-no-files-found: warn
+          retention-days: 30
