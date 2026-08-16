@@ -35,11 +35,12 @@ jobs:
 
       - name: Run seven-asset analysis
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TRADINGAGENTS_RUN_DATE: ${{ inputs.run_date }}
           TRADINGAGENTS_RESULTS_DIR: results/watchlist
-          TRADINGAGENTS_DEEP_THINK_LLM: z-ai/glm-5.2
-          TRADINGAGENTS_QUICK_THINK_LLM: z-ai/glm-5.2
+          TRADINGAGENTS_LLM_PROVIDER: gemini
+          TRADINGAGENTS_DEEP_THINK_LLM: gemini-2.5-flash
+          TRADINGAGENTS_QUICK_THINK_LLM: gemini-2.5-flash
           TRADINGAGENTS_MAX_DEBATE_ROUNDS: "1"
           TRADINGAGENTS_MAX_RISK_ROUNDS: "1"
         run: python scripts/run_watchlist.py
