@@ -39,8 +39,8 @@ jobs:
           TRADINGAGENTS_RUN_DATE: ${{ inputs.run_date }}
           TRADINGAGENTS_RESULTS_DIR: results/watchlist
           TRADINGAGENTS_LLM_PROVIDER: gemini
-          TRADINGAGENTS_DEEP_THINK_LLM: gemini-2.5-flash
-          TRADINGAGENTS_QUICK_THINK_LLM: gemini-2.5-flash
+          TRADINGAGENTS_DEEP_THINK_LLM: gemini-3.6-flash
+          TRADINGAGENTS_QUICK_THINK_LLM: gemini-3.6-flash
           TRADINGAGENTS_MAX_DEBATE_ROUNDS: "1"
           TRADINGAGENTS_MAX_RISK_ROUNDS: "1"
         run: python scripts/run_watchlist.py
