@@ -23,11 +23,13 @@ def main():
     output_dir = Path(os.getenv("TRADINGAGENTS_RESULTS_DIR", "results/watchlist"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    provider = os.getenv("TRADINGAGENTS_LLM_PROVIDER", "nvidia")
     config = dict(DEFAULT_CONFIG)
-    config["llm_provider"] = "nvidia"
+    config["llm_provider"] = provider
     config["deep_think_llm"] = os.getenv("TRADINGAGENTS_DEEP_THINK_LLM", "z-ai/glm-5.2")
     config["quick_think_llm"] = os.getenv("TRADINGAGENTS_QUICK_THINK_LLM", "z-ai/glm-5.2")
-    config["backend_url"] = "https://integrate.api.nvidia.com/v1"
+    if provider == "nvidia":
+        config["backend_url"] = "https://integrate.api.nvidia.com/v1"
     config["results_dir"] = str(output_dir)
     config["checkpoint_enabled"] = False
     config["max_debate_rounds"] = int(os.getenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "1"))
