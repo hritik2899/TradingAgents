@@ -19,17 +19,20 @@ WATCHLIST = [
     ("Bitcoin", "BTC-USD", "crypto", ("market", "social", "news")),
 ]
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+
 
 def build_config(output_dir: Path) -> dict:
     provider = os.getenv("TRADINGAGENTS_LLM_PROVIDER", "gemini").lower()
+    default_model = DEFAULT_GEMINI_MODEL if provider in {"google", "gemini"} else "gpt-5.4-mini"
     config = dict(DEFAULT_CONFIG)
     config["llm_provider"] = provider
-    config["deep_think_llm"] = os.getenv("TRADINGAGENTS_DEEP_THINK_LLM", "gemini-2.5-flash")
-    config["quick_think_llm"] = os.getenv("TRADINGAGENTS_QUICK_THINK_LLM", "gemini-2.5-flash")
+    config["deep_think_llm"] = os.getenv("TRADINGAGENTS_DEEP_THINK_LLM", default_model)
+    config["quick_think_llm"] = os.getenv("TRADINGAGENTS_QUICK_THINK_LLM", default_model)
     if provider == "nvidia":
         config["backend_url"] = "https://integrate.api.nvidia.com/v1"
     else:
-        config.pop("backend_url", None)
+        config["backend_url"] = None
     config["results_dir"] = str(output_dir)
     config["checkpoint_enabled"] = False
     config["max_debate_rounds"] = int(os.getenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "1"))
@@ -42,9 +45,16 @@ def preflight_llm(config: dict) -> None:
     """Make one tiny LLM request before starting the seven-asset run."""
     provider = config["llm_provider"]
     model = config["quick_think_llm"]
-    if provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
+    if provider in {"gemini", "google"} and not (
+        os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    ):
         raise RuntimeError("GEMINI_API_KEY is not configured in the workflow secrets")
-    client = create_llm_client(provider=provider, model=model, base_url=config.get("backend_url"))
+    client = create_llm_client(
+        provider=provider,
+        model=model,
+        base_url=config.get("backend_url"),
+        api_key=os.getenv("GEMINI_API_KEY") if provider in {"gemini", "google"} else None,
+    )
     response = client.get_llm().invoke("Reply with exactly: OK")
     print(f"LLM preflight passed: provider={provider}, model={model}, response={response.content!r}")
 
