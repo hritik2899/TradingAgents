@@ -7,18 +7,16 @@ def create_llm_client(
     base_url: str | None = None,
     **kwargs,
 ) -> BaseLLMClient:
-    """Create an LLM client for the specified provider.
-
-    Provider modules are imported lazily so that simply importing this
-    factory does not pull in optional LLM SDKs unnecessarily.
-    """
+    """Create an LLM client for the specified provider."""
     provider_lower = provider.lower()
 
-    # Gemini is exposed as both "google" (the native provider name) and
-    # "gemini" (the user-facing name used by the watchlist workflow).
     if provider_lower in {"google", "gemini"}:
         from .google_client import GoogleClient
         return GoogleClient(model, base_url, **kwargs)
+
+    if provider_lower == "cloudflare":
+        from .cloudflare_client import CloudflareClient
+        return CloudflareClient(model, base_url, **kwargs)
 
     if provider_lower == "anthropic":
         from .anthropic_client import AnthropicClient
